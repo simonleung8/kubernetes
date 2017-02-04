@@ -76,7 +76,8 @@ import (
 )
 
 // Blah is a test.
-// +k8s:openapi=true
+// +k8s:openapi-gen=true
+// +k8s:openapi-gen=x-kubernetes-type-tag:type_test
 type Blah struct {
 	// A simple string
 	String string
@@ -116,6 +117,9 @@ type Blah struct {
 	ByteArray []byte
 	// an int or string type
 	IntOrString intstr.IntOrString
+	// a member with an extension
+	// +k8s:openapi-gen=x-kubernetes-member-tag:member_test
+	WithExtension string
 }
 		`)
 	if err != nil {
@@ -243,9 +247,28 @@ SchemaProps: spec.SchemaProps{
 Description: "an int or string type",
 Ref: spec.MustCreateRef("#/definitions/intstr.IntOrString"),
 },
+"WithExtension": {
+spec.VendorExtensible: {
+Extensions: spec.Extensions{
+"x-kubernetes-member-tag": "member_test",
+},
+},
+SchemaProps: spec.SchemaProps{
+Description: "a member with an extension",
+Type: []string{"string"},
+Format: "",
+},
+},
+},
+Required: []string{"String","Int64","Int32","Int16","Int8","Uint","Uint64","Uint32","Uint16","Uint8","Byte","Bool","Float64","Float32","ByteArray","WithExtension"},
 },
 },
 Required: []string{"String","Int64","Int32","Int16","Int8","Uint","Uint64","Uint32","Uint16","Uint8","Byte","Bool","Float64","Float32","Time","ByteArray","IntOrString"},
+},
+spec.VendorExtensible: {
+Extensions: spec.Extensions{
+"x-kubernetes-type-tag": "type_test",
+},
 },
 },
 Dependencies: []string{
