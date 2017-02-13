@@ -27,6 +27,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	yamlserializer "k8s.io/apimachinery/pkg/runtime/serializer/yaml"
@@ -1229,6 +1230,51 @@ func TestPrintHumanReadableWithNamespace(t *testing.T) {
 			if err == nil {
 				t.Errorf("Expected error when printing un-namespaced type")
 			}
+		}
+	}
+}
+
+func TestPrintHumanReadableWithXKubernetesKubectlGetColumns(t *testing.T) {
+	table := []struct {
+		obj runtime.Object
+	}{
+		{
+			obj: &unstructured.Unstructured{map[string]interface{}{
+				"name": "test-instance",
+				"x-kubernetes-kubectl-get-columns": "NewField1:.newfield1,NewField2:.newfield2",
+				"newfield1":                        "foo",
+				"newfield2":                        "bar",
+			}},
+		},
+	}
+
+	for _, test := range table {
+		printer := NewHumanReadablePrinter(PrintOptions{})
+
+		buffer := &bytes.Buffer{}
+		err := printer.PrintObj(test.obj, buffer)
+		if err != nil {
+			t.Fatalf("An error occurred printing object: %#v", err)
+		}
+
+		matched := contains(strings.Fields(buffer.String()), "NEWFIELD1")
+		if !matched {
+			t.Errorf("Expect printing object to contain NEWFIELD1: %#v", test.obj)
+		}
+
+		matched = contains(strings.Fields(buffer.String()), "NEWFIELD2")
+		if !matched {
+			t.Errorf("Expect printing object to contain NEWFIELD2: %#v", test.obj)
+		}
+
+		matched = contains(strings.Fields(buffer.String()), "foo")
+		if !matched {
+			t.Errorf("Expect printing object to contain foo: %#v", test.obj)
+		}
+
+		matched = contains(strings.Fields(buffer.String()), "bar")
+		if !matched {
+			t.Errorf("Expect printing object to contain bar: %#v", test.obj)
 		}
 	}
 }

@@ -19,6 +19,7 @@ package kubectl
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -2428,10 +2429,18 @@ func (h *HumanReadablePrinter) PrintObj(obj runtime.Object, output io.Writer) er
 		return resultValue.Interface().(error)
 	}
 
+	var extHeaders, extFieldSpec []string
 	if _, err := meta.Accessor(obj); err == nil {
 		if !h.options.NoHeaders && t != h.lastType {
 			headers := []string{"NAME", "KIND"}
 			headers = append(headers, formatLabelHeaders(h.options.ColumnLabels)...)
+
+			unstructured, ok := obj.(runtime.Unstructured)
+			if ok {
+				extHeaders, extFieldSpec, _ = getKubeCtlColumns(unstructured.UnstructuredContent()["x-kubernetes-kubectl-get-columns"].(string))
+				headers = append(headers, formatLabelHeaders(extHeaders)...)
+			}
+
 			// LABELS is always the last column.
 			headers = append(headers, formatShowLabelsHeader(h.options.ShowLabels, t)...)
 			if h.options.WithNamespace {
@@ -2447,7 +2456,7 @@ func (h *HumanReadablePrinter) PrintObj(obj runtime.Object, output io.Writer) er
 			return fmt.Errorf("error: unknown type %#v", obj)
 		}
 		// if the error isn't nil, report the "I don't recognize this" error
-		if err := printUnstructured(unstructured, w, h.options); err != nil {
+		if err := printUnstructured(unstructured, w, h.options, extHeaders, extFieldSpec); err != nil {
 			return err
 		}
 		return nil
@@ -2457,7 +2466,33 @@ func (h *HumanReadablePrinter) PrintObj(obj runtime.Object, output io.Writer) er
 	return fmt.Errorf("error: unknown type %#v", obj)
 }
 
-func printUnstructured(unstructured runtime.Unstructured, w io.Writer, options PrintOptions) error {
+//This func is used to extra headers and values from `x-kubernetes-kubectl-get-columns` or
+//`x-kubernetes-kubectl-get-columns`. Returns '[]header, []value, error'
+func getKubeCtlColumns(str string) ([]string, []string, error) {
+	var headers, fieldSpec []string
+	columns := strings.Split(str, ",")
+	for _, col := range columns {
+		tmp := strings.Split(col, ":")
+		if len(tmp) != 2 {
+			return nil, nil, errors.New("Error parsing x-kubenete entension")
+		}
+		headers = append(headers, tmp[0])
+		fieldSpec = append(fieldSpec, tmp[1])
+	}
+
+	return headers, fieldSpec, nil
+}
+
+func printUnstructured(unstructured runtime.Unstructured, w io.Writer, options PrintOptions, extHeaders, extFieldSpec []string) error {
+	parsers := make([]*jsonpath.JSONPath, len(extHeaders))
+	for ix := range extHeaders {
+		parsers[ix] = jsonpath.New(extHeaders[ix])
+		fmt.Printf("FieldSpec no:%#v\n\n", extFieldSpec[ix])
+		if err := parsers[ix].Parse(fmt.Sprintf("{%s}", extFieldSpec[ix])); err != nil {
+			return err
+		}
+	}
+
 	metadata, err := meta.Accessor(unstructured)
 	if err != nil {
 		return err
@@ -2489,6 +2524,35 @@ func printUnstructured(unstructured runtime.Unstructured, w io.Writer, options P
 
 	if _, err := fmt.Fprintf(w, "%s\t%s", name, kind); err != nil {
 		return err
+	}
+	if len(parsers) > 0 {
+		fmt.Fprintf(w, "\t")
+		columns := make([]string, len(parsers))
+		var values [][]reflect.Value
+		var err error
+		for ix := 0; ix < len(parsers); ix++ {
+			parser := parsers[ix]
+
+			if values, err = parser.FindResults(unstructured.UnstructuredContent()); err != nil {
+				return err
+			}
+			fmt.Printf("VALUES: %#v\n\n", values)
+
+			if len(values) == 0 || len(values[0]) == 0 {
+				fmt.Fprintf(w, "<none>\t")
+			}
+
+			valueStrings := []string{}
+			for arrIx := range values {
+				for valIx := range values[arrIx] {
+					valueStrings = append(valueStrings, fmt.Sprintf("%v", values[arrIx][valIx].Interface()))
+				}
+			}
+			columns[ix] = strings.Join(valueStrings, ",")
+		}
+		if _, err := fmt.Fprintf(w, strings.Join(columns, "\t")); err != nil {
+			return err
+		}
 	}
 	if _, err := fmt.Fprint(w, AppendLabels(metadata.GetLabels(), options.ColumnLabels)); err != nil {
 		return err
