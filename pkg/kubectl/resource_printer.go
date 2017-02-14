@@ -2487,7 +2487,6 @@ func printUnstructured(unstructured runtime.Unstructured, w io.Writer, options P
 	parsers := make([]*jsonpath.JSONPath, len(extHeaders))
 	for ix := range extHeaders {
 		parsers[ix] = jsonpath.New(extHeaders[ix])
-		fmt.Printf("FieldSpec no:%#v\n\n", extFieldSpec[ix])
 		if err := parsers[ix].Parse(fmt.Sprintf("{%s}", extFieldSpec[ix])); err != nil {
 			return err
 		}
@@ -2536,7 +2535,6 @@ func printUnstructured(unstructured runtime.Unstructured, w io.Writer, options P
 			if values, err = parser.FindResults(unstructured.UnstructuredContent()); err != nil {
 				return err
 			}
-			fmt.Printf("VALUES: %#v\n\n", values)
 
 			if len(values) == 0 || len(values[0]) == 0 {
 				fmt.Fprintf(w, "<none>\t")

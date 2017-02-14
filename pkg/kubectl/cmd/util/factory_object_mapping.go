@@ -21,6 +21,7 @@ package util
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path"
 	"sort"
@@ -100,6 +101,17 @@ func (f *ring1Factory) UnstructuredObject() (meta.RESTMapper, runtime.ObjectType
 	if err != nil {
 		return nil, nil, err
 	}
+
+	///////////////////////////////////////////
+	d := discoveryClient
+	for _, group := range groupResources {
+		for _, groupVersion := range group.Group.Versions {
+			url := url.URL{}
+			b, _ := d.RESTClient().Get().AbsPath(url.String()).DoRaw()
+			fmt.Printf("RESULT: %#v\n\n", string(b))
+		}
+	}
+	///////////////////////////////////////////
 
 	mapper := discovery.NewDeferredDiscoveryRESTMapper(discoveryClient, meta.InterfacesForUnstructured)
 	typer := discovery.NewUnstructuredObjectTyper(groupResources)
