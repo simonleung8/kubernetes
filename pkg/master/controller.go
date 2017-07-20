@@ -23,14 +23,17 @@ import (
 
 	"github.com/golang/glog"
 	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/wait"
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/endpoints"
+	bootstrapapi "k8s.io/kubernetes/pkg/bootstrap/api"
 	coreclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/internalversion"
 	"k8s.io/kubernetes/pkg/registry/core/rangeallocation"
 	corerest "k8s.io/kubernetes/pkg/registry/core/rest"
@@ -40,14 +43,17 @@ import (
 )
 
 const kubernetesServiceName = "kubernetes"
+const clusterInfoConfigMapName = "cluster-info"
+const clusterID = "cluster-id"
 
 // Controller is the controller manager for the core bootstrap Kubernetes
 // controller loops, which manage creating the "kubernetes" service, the
 // "default", "kube-system" and "kube-public" namespaces, and provide the IP
 // repair check on service IPs
 type Controller struct {
-	ServiceClient   coreclient.ServicesGetter
-	NamespaceClient coreclient.NamespacesGetter
+	ServiceClient    coreclient.ServicesGetter
+	NamespaceClient  coreclient.NamespacesGetter
+	ConfigMapsClient coreclient.ConfigMapsGetter
 
 	ServiceClusterIPRegistry rangeallocation.RangeRegistry
 	ServiceClusterIPInterval time.Duration
@@ -63,6 +69,8 @@ type Controller struct {
 	SystemNamespaces         []string
 	SystemNamespacesInterval time.Duration
 
+	ClusterConfigMapInterval time.Duration
+
 	PublicIP net.IP
 
 	// ServiceIP indicates where the kubernetes service will live.  It may not be nil.
@@ -74,13 +82,16 @@ type Controller struct {
 	KubernetesServiceNodePort int
 
 	runner *async.Runner
+
+	ClusterID string
 }
 
 // NewBootstrapController returns a controller for watching the core capabilities of the master
-func (c *Config) NewBootstrapController(legacyRESTStorage corerest.LegacyRESTStorage, serviceClient coreclient.ServicesGetter, nsClient coreclient.NamespacesGetter) *Controller {
+func (c *Config) NewBootstrapController(legacyRESTStorage corerest.LegacyRESTStorage, serviceClient coreclient.ServicesGetter, nsClient coreclient.NamespacesGetter, configmapsClient coreclient.ConfigMapsGetter) *Controller {
 	return &Controller{
-		ServiceClient:   serviceClient,
-		NamespaceClient: nsClient,
+		ServiceClient:    serviceClient,
+		NamespaceClient:  nsClient,
+		ConfigMapsClient: configmapsClient,
 
 		EndpointReconciler: c.EndpointReconcilerConfig.Reconciler,
 		EndpointInterval:   c.EndpointReconcilerConfig.Interval,
@@ -104,6 +115,9 @@ func (c *Config) NewBootstrapController(legacyRESTStorage corerest.LegacyRESTSto
 		ExtraEndpointPorts:        c.ExtraEndpointPorts,
 		PublicServicePort:         c.GenericConfig.ReadWritePort,
 		KubernetesServiceNodePort: c.KubernetesServiceNodePort,
+
+		ClusterConfigMapInterval: 1 * time.Minute,
+		ClusterID:                "",
 	}
 }
 
@@ -136,8 +150,17 @@ func (c *Controller) Start() {
 		glog.Errorf("Unable to perform initial Kubernetes service initialization: %v", err)
 	}
 
-	c.runner = async.NewRunner(c.RunKubernetesNamespaces, c.RunKubernetesService, repairClusterIPs.RunUntil, repairNodePorts.RunUntil)
+	c.runner = async.NewRunner(c.RunKubernetesClusterConfigMap, c.RunKubernetesNamespaces, c.RunKubernetesService, repairClusterIPs.RunUntil, repairNodePorts.RunUntil)
 	c.runner.Start()
+}
+
+// RunKubernetesClusterConfigMap periodically makes sure that configmap for cluster info exists
+func (c *Controller) RunKubernetesClusterConfigMap(ch chan struct{}) {
+	wait.Until(func() {
+		if err := c.UpdateOrCreateClusterConfigMapIfNeeded(); err != nil {
+			runtime.HandleError(fmt.Errorf("unable to create cluster info configmap: %v", err))
+		}
+	}, c.ClusterConfigMapInterval, ch)
 }
 
 // RunKubernetesNamespaces periodically makes sure that all internal namespaces exist
@@ -201,6 +224,44 @@ func (c *Controller) CreateNamespaceIfNeeded(ns string) error {
 	if err != nil && errors.IsAlreadyExists(err) {
 		err = nil
 	}
+	return err
+}
+
+// UpdateOrCreateClusterConfigMapIfNeeded creates a configmap of cluster info if it doesn't already exist
+func (c *Controller) UpdateOrCreateClusterConfigMapIfNeeded() error {
+	configmaps := c.ConfigMapsClient.ConfigMaps(metav1.NamespacePublic)
+
+	clusterInfo, err := configmaps.Get(bootstrapapi.ConfigMapClusterInfo, metav1.GetOptions{})
+	if err != nil {
+		//configmap doesn't exist, creating a new one
+		if apierrors.IsNotFound(err) {
+			if c.ClusterID == "" {
+				c.ClusterID = string(uuid.NewUUID())
+			}
+
+			newCM := &api.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: bootstrapapi.ConfigMapClusterInfo},
+				Data:       map[string]string{clusterID: c.ClusterID},
+			}
+
+			_, err := configmaps.Create(newCM)
+			return err
+		} else {
+			return err
+		}
+	}
+
+	//configmap exists, read and update if necessary
+	if id, ok := clusterInfo.Data[clusterID]; ok {
+		c.ClusterID = id
+		return nil
+	}
+
+	if c.ClusterID == "" {
+		c.ClusterID = string(uuid.NewUUID())
+	}
+	clusterInfo.Data[clusterID] = c.ClusterID
+	_, err = configmaps.Update(clusterInfo)
 	return err
 }
 

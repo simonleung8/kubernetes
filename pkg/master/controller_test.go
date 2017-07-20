@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	core "k8s.io/client-go/testing"
 	"k8s.io/kubernetes/pkg/api"
+	bootstrapapi "k8s.io/kubernetes/pkg/bootstrap/api"
 	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
 )
 
@@ -943,5 +944,81 @@ func TestCreateOrUpdateMasterService(t *testing.T) {
 		if test.expectUpdate == nil && len(updates) > 0 {
 			t.Errorf("case %q: no update expected, yet saw: %v", test.testName, updates)
 		}
+	}
+}
+
+func TestUpdateOrCreateClusterConfigMapIfNeeded(t *testing.T) {
+	existingCM := &api.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      bootstrapapi.ConfigMapClusterInfo,
+			Namespace: metav1.NamespacePublic,
+		},
+		Data: map[string]string{
+			clusterID: "abc123",
+		},
+	}
+
+	master := Controller{}
+	master.ClusterID = "xyz-567"
+	fakeClient := fake.NewSimpleClientset(existingCM)
+	master.ConfigMapsClient = fakeClient.Core()
+
+	err := master.UpdateOrCreateClusterConfigMapIfNeeded()
+	if err != nil {
+		t.Errorf("unexpected error (%s)", err)
+	}
+
+	for _, action := range fakeClient.Actions() {
+		if action.GetVerb() == "create" {
+			t.Errorf("unexpected cluster-info configmap created")
+		}
+	}
+	if master.ClusterID != "abc123" {
+		t.Errorf("unexpected cluster id value")
+	}
+
+	emptyCM := &api.ConfigMap{}
+	fakeClient = fake.NewSimpleClientset(emptyCM)
+	master.ClusterID = ""
+	master.ConfigMapsClient = fakeClient.Core()
+	err = master.UpdateOrCreateClusterConfigMapIfNeeded()
+	if err != nil {
+		t.Errorf("unexpected error (%s)", err)
+	}
+
+	if len(fakeClient.Actions()) != 2 {
+		t.Errorf("missing expected action ('GET' and 'CREATE' on configmap expected)")
+	}
+	if master.ClusterID == "" {
+		t.Errorf("missing cluster id value")
+	}
+
+	emptyCM = &api.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      bootstrapapi.ConfigMapClusterInfo,
+			Namespace: metav1.NamespacePublic,
+		},
+		Data: map[string]string{
+			"other-field": "something",
+		},
+	}
+	fakeClient = fake.NewSimpleClientset(emptyCM)
+	master.ClusterID = "existing-id"
+	master.ConfigMapsClient = fakeClient.Core()
+	err = master.UpdateOrCreateClusterConfigMapIfNeeded()
+	if err != nil {
+		t.Errorf("unexpected error (%s)", err)
+	}
+
+	if len(fakeClient.Actions()) != 2 {
+		t.Errorf("missing expected action ('GET' and 'CREATE' on configmap expected)")
+	}
+	if master.ClusterID != "existing-id" {
+		t.Errorf("existing cluster-id overwritten")
+	}
+
+	updatedMap := fakeClient.Actions()[1].(core.UpdateAction).GetObject()
+	if _, ok := updatedMap.(*api.ConfigMap).Data["other-field"]; !ok {
+		t.Errorf("Field (other-field) is overwritten on configmap update.")
 	}
 }
