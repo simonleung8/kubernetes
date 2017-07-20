@@ -23,12 +23,14 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientsetfake "k8s.io/client-go/kubernetes/fake"
 	core "k8s.io/client-go/testing"
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
-	"k8s.io/kubernetes/pkg/api"
+	bootstrapapi "k8s.io/kubernetes/pkg/bootstrap/api"
 )
 
 const testConfig = `apiVersion: v1
@@ -83,24 +85,63 @@ func TestEncodeTokenSecretData(t *testing.T) {
 
 func TestCreateBootstrapConfigMapIfNotExists(t *testing.T) {
 	tests := []struct {
-		name      string
-		createErr error
-		expectErr bool
+		name                     string
+		existingConfigmap        *v1.ConfigMap
+		expectingConfigmapFields []string
+		getErr                   error
+		createErr                error
+		updateErr                error
+		expectErr                bool
 	}{
 		{
 			"successful case should have no error",
 			nil,
+			[]string{"kubeconfig"},
+			apierrors.NewNotFound(v1.Resource("configMap"), "configmap doesn't exist"),
+			nil,
+			nil,
 			false,
 		},
 		{
-			"duplicate creation should have no error",
-			apierrors.NewAlreadyExists(api.Resource("configmaps"), "test"),
-			false,
+			"unexpected error on Get should be returned",
+			nil,
+			[]string{},
+			apierrors.NewUnauthorized("go away!"),
+			nil,
+			nil,
+			true,
 		},
 		{
-			"unexpected error should be returned",
+			"Error on Update should be returned",
+			&v1.ConfigMap{Data: map[string]string{}},
+			[]string{},
+			nil,
+			nil,
 			apierrors.NewUnauthorized("go away!"),
 			true,
+		},
+		{
+			"Error on Create should be returned",
+			nil,
+			[]string{},
+			apierrors.NewNotFound(v1.Resource("configMap"), "configmap doesn't exist"),
+			apierrors.NewUnauthorized("go away!"),
+			nil,
+			true,
+		},
+		{
+			"update should retain existing configmap data field",
+			&v1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: bootstrapapi.ConfigMapClusterInfo},
+				Data: map[string]string{
+					"cluster-id": "some-id",
+				},
+			},
+			[]string{"kubeconfig", "cluster-id"},
+			nil,
+			nil,
+			nil,
+			false,
 		},
 	}
 
@@ -114,17 +155,30 @@ func TestCreateBootstrapConfigMapIfNotExists(t *testing.T) {
 
 	for _, tc := range tests {
 		client := clientsetfake.NewSimpleClientset()
-		if tc.createErr != nil {
-			client.PrependReactor("create", "configmaps", func(action core.Action) (bool, runtime.Object, error) {
-				return true, nil, tc.createErr
-			})
-		}
+		client.PrependReactor("get", "configmaps", func(action core.Action) (bool, runtime.Object, error) {
+			return true, tc.existingConfigmap, tc.getErr
+		})
+		client.PrependReactor("create", "configmaps", func(action core.Action) (bool, runtime.Object, error) {
+			return true, nil, tc.createErr
+		})
+		client.PrependReactor("update", "configmaps", func(action core.Action) (bool, runtime.Object, error) {
+			return true, nil, tc.updateErr
+		})
 
-		err = CreateBootstrapConfigMapIfNotExists(client, file.Name())
+		err = UpdateOrCreateBootstrapConfigMapIfNeeded(client, file.Name())
 		if tc.expectErr && err == nil {
-			t.Errorf("CreateBootstrapConfigMapIfNotExists(%s) wanted error, got nil", tc.name)
+			t.Errorf("UpdateOrCreateBootstrapConfigMapIfNeeded(%s) wanted error, got nil", tc.name)
 		} else if !tc.expectErr && err != nil {
-			t.Errorf("CreateBootstrapConfigMapIfNotExists(%s) returned unexpected error: %v", tc.name, err)
+			t.Errorf("UpdateOrCreateBootstrapConfigMapIfNeeded(%s) returned unexpected error: %v", tc.name, err)
+		}
+		if len(tc.expectingConfigmapFields) > 0 {
+			newMap := client.Actions()[1].(core.CreateAction).GetObject()
+			for _, field := range tc.expectingConfigmapFields {
+				if _, exists := newMap.(*v1.ConfigMap).Data[field]; !exists {
+					t.Errorf("UpdateOrCreateBootstrapConfigMapIfNeeded contains missing data field(%s)", field)
+				}
+
+			}
 		}
 	}
 }

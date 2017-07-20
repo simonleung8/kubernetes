@@ -86,8 +86,8 @@ func UpdateOrCreateToken(client *clientset.Clientset, token string, failIfExists
 	)
 }
 
-// CreateBootstrapConfigMapIfNotExists creates the public cluster-info ConfigMap (if it doesn't already exist)
-func CreateBootstrapConfigMapIfNotExists(client clientset.Interface, file string) error {
+// UpdateOrCreateBootstrapConfigMapIfNeeded creates the public cluster-info ConfigMap (if it doesn't already exist)
+func UpdateOrCreateBootstrapConfigMapIfNeeded(client clientset.Interface, file string) error {
 	adminConfig, err := clientcmd.LoadFromFile(file)
 	if err != nil {
 		return fmt.Errorf("failed to load admin kubeconfig [%v]", err)
@@ -105,20 +105,31 @@ func CreateBootstrapConfigMapIfNotExists(client clientset.Interface, file string
 		return err
 	}
 
-	bootstrapConfigMap := v1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: bootstrapapi.ConfigMapClusterInfo},
-		Data: map[string]string{
-			bootstrapapi.KubeConfigKey: string(bootstrapBytes),
-		},
-	}
+	clusterInfo, err := client.CoreV1().ConfigMaps(metav1.NamespacePublic).Get(bootstrapapi.ConfigMapClusterInfo, metav1.GetOptions{})
+	if err != nil {
+		//Configmap dose not exist, create a new one
+		if apierrors.IsNotFound(err) {
+			bootstrapConfigMap := v1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: bootstrapapi.ConfigMapClusterInfo},
+				Data: map[string]string{
+					bootstrapapi.KubeConfigKey: string(bootstrapBytes),
+				},
+			}
 
-	if _, err := client.CoreV1().ConfigMaps(metav1.NamespacePublic).Create(&bootstrapConfigMap); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			return nil
+			_, err = client.CoreV1().ConfigMaps(metav1.NamespacePublic).Create(&bootstrapConfigMap)
+			return err
 		}
 		return err
 	}
-	return nil
+
+	//Configmap exists, update if data is not present
+	if _, exists := clusterInfo.Data[bootstrapapi.KubeConfigKey]; exists {
+		return nil
+	}
+
+	clusterInfo.Data[bootstrapapi.KubeConfigKey] = string(bootstrapBytes)
+	_, err = client.CoreV1().ConfigMaps(metav1.NamespacePublic).Update(clusterInfo)
+	return err
 }
 
 // encodeTokenSecretData takes the token discovery object and an optional duration and returns the .Data for the Secret
